@@ -1,140 +1,129 @@
-#include <stdio.h>
 
-#include <stdint.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <signal.h>
+/* unix */
+#include <unistd.h>
+#include <fcntl.h>
 
-#define STACK_SIZE (UINT16_MAX*2)
-enum Registers {
-    R_R0,
-    R_R1,
-    R_R2,
-    R_R3,
-    R_R4,
-    R_R5,
-    R_R6,
-    R_R7,
-    R_COND,
-    R_PC,
-    R_SP,
-    R_COUNT
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/termios.h>
+#include <sys/mman.h>
+
+#define PC_START 0x3000
+enum {
+    BR,ADD,LD,ST,
+    JSR,AND,LDR,STR,
+    RTI,NOT,LDI,STI,
+    LMP,RES,LEA,TRAP
 };
 
-enum Instructions {
-    HALT,
-    STR,
-    LD,
-    MOV,
-    ADD,
-    SUB,
-    MUL,
-    DIV,
-    AND,
-    OR,
-    RET,
-    RETS,
-    LOOP,
-    BREAK
+enum {
+    R0,R1,R2,R3,
+    R4,R5,R6,R7,
+    PC,CND
+    RCOUNT;
 };
 
-static uint16_t opCode,reg_1,reg_2,reg_3,imm;
-static uint16_t memory[UINT16_MAX]={0x3000,0x3319,0xC004,0xD000,0xB000,0x0000};
-static uint16_t stack[STACK_SIZE]={0};
-static uint16_t regs[R_COUNT]={0};
-uint16_t fetch() {
-    return memory[regs[R_PC]++];
-}
-void decode(uint16_t instr) {
-    opCode=(instr&0xf000)>>12;
-    reg_1=(instr&0xf00)>>8;
-    reg_2=(instr&0xf0)>>4;
-    reg_3=(instr&0xf);
-    imm=(instr&0xff);
+enum {
+    FL_POS=1<<0,
+    FL_ZERO=1<<1,
+    FL_NEG=1<<2
+};
+
+uint16_t memory[UINT16_MAX];
+uint16_t regs[RCOUNT];
+
+uint16_t sign_extend(uint16_t x,uint8_t bit_count) {
+    if((x>>(bit_count-1))&1) {
+        x|=0xffff<<bit_count;
+    }
+    return x;
 }
 
-void execute(instr) {
-        decode(instr);
-        switch(opCode) {
-            case 0x0:
-                exit(EXIT_SUCCESS);
-                break;
-            case 0x1:
-                regs[R_SP]++;
-                if(reg_1==0) {
-                    //store register
-                    stack[regs[R_SP]]=regs[reg_2];
-                } else {
-                    stack[regs[R_SP]]=imm;
+void update_flags(uint16_t r) {
+    if(regs[r]==0) {
+        regs[CND]=FL_ZERO;
+    } else if(regs[r]>>15) {
+        regs[CND]=FL_NEG;
+    } else {
+        regs[CND]=FL_POS;
+    }
+}
+int main(int argc,char* argv[]) {
+    regs[PC]=PC_START;
+    uint8_t running=1;
+    while(running) {
+        if(argc<2) {
+            printf("Usage: %s [image] ...\n",argv[0]);
+            exit(1);
+        }
+        for(int itr=1;itr<argc;itr++) {
+            if(!read_image(argv[itr])) {
+                printf("Error loading image file %s\n",argv[itr]);
+            }
+        }
+        uint16_t instr=mem_read(regs[PC]++);
+        uint16_t op=instr>>12;
+        switch(op) {
+            case ADD:
+                {
+                    uint16_t r0=(instr>>9)&0x7;
+                    uint16_t r1=(instr>>6)&0x7;
+                    uint16_t imm_flag=(instr>>5)&0x1;
+                    if(imm_flag) {
+                        uint16_t imm5=sign_extend(instr&0x1f,5);
+                        regs[r0]=regs[r1]+imm5;
+                    } else {
+                        uint16_t r2=instr&0x7;
+                        regs[r0]=regs[r1]+regs[r2];
+                    }
+                    update_flags(r0);
                 }
                 break;
-            case 0x2:
-                //load value from stack and store in reg_1
-                regs[reg_1]=stack[reg_2];
-                printf("%c ",regs[reg_1]);
+            case AND:
+                break
+            case BR:
                 break;
-            case 0x3:
-                printf("%d\n",imm);
-                regs[reg_1]=imm;
+            case JMP:
                 break;
-            case 0x4:
-                regs[reg_1]=regs[reg_2]+regs[reg_3];
+            case JSR:
                 break;
-            case 0x5:
-                regs[reg_1]=regs[reg_2]-regs[reg_3];
+            case LD:
                 break;
-            case 0x6:
-                regs[reg_1]=regs[reg_2]*regs[reg_3];
-                break;
-            case 0x7:
-                regs[reg_1]=regs[reg_2]/regs[reg_3];
-                break;
-            case 0x8:
-                regs[R_R0]=regs[reg_1]&regs[reg_2];
-                break;
-            case 0x9:
-                regs[R_R0]=regs[reg_1]|regs[reg_2];
-                break;
-            case 0xA:
-                printf("%d",regs[reg_1]);
-                break;
-            case 0xB:
-                
-                for(int i=0;i<=regs[R_R3];i++) {
-                    printf("%c",stack[regs[R_R0]]);
-                    regs[R_R0]++;
+            case LDI:
+                {
+                    uint16_t r0=(instr>>9)&0x7;
+                    uint16_t pc_offset=sign_extend(instr&0x1ff,9);
+                    
+                    regs[r0]=mem_read(mem_read(regs[PC]+pc_offset));
+                    update_flags(r0);
+                    
                 }
                 break;
-            case 0xC:
-                while(1) {
-                    regs[R_PC]=imm;
-                    execute(memory[regs[R_PC]]);
-                }
+            case LDR:
                 break;
-            case 0xD:
+            case LEA:
                 break;
-            case 0xE:
+            case NOT:
                 break;
-            case 0xF:
+            case RET:
                 break;
-                
+            case RTI:
+                break;
+            case ST:
+                break;
+            case STI:
+                break;
+            case STR:
+                break;
+            case TRAP:
+                break;
             default:
                 break;
         }
-}
-int run() {
-    bool running=true;
-    while(running) {
-        uint16_t instr=fetch();
-        execute(instr);
     }
-    return 0;
-}
-int main() {
-    for(int i=0;i<=25;++i) {
-        stack[i]=65+i;
-    }
-    run();
-    printf("\n");
-    return 0;
 }
